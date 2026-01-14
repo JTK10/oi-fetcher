@@ -1,49 +1,28 @@
-import requests
-import boto3
-import os
-import json
-from datetime import datetime
+name: NSE OI Fetcher
 
-# ===== ENV VARS =====
-DDB_TABLE = os.getenv("DYNAMODB_TABLE", "NSE_OI_DATA")
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Accept": "application/json",
-    "Referer": "https://www.nseindia.com/"
-}
+jobs:
+  run:
+    runs-on: ubuntu-latest
 
-def fetch_nse_oi():
-    s = requests.Session()
-    s.headers.update(HEADERS)
+    steps:
+      - uses: actions/checkout@v4
 
-    # Step 1: Set cookies
-    s.get("https://www.nseindia.com", timeout=10)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
-    # Step 2: Fetch Stock Futures OI
-    url = "https://www.nseindia.com/api/liveEquity-derivatives?index=stock_fut"
-    r = s.get(url, timeout=10)
-    r.raise_for_status()
+      - name: Install dependencies
+        run: pip install requests boto3
 
-    return r.json()
-
-def save_to_dynamodb(data):
-    dynamodb = boto3.resource("dynamodb")
-    table = dynamodb.Table(DDB_TABLE)
-
-    item = {
-        "PK": "NSE#OI",
-        "SK": datetime.utcnow().isoformat(),
-        "data": json.dumps(data)
-    }
-
-    table.put_item(Item=item)
-
-if __name__ == "__main__":
-    print("Fetching NSE OI...")
-    data = fetch_nse_oi()
-
-    print("Saving to DynamoDB...")
-    save_to_dynamodb(data)
-
-    print("Done.")
+      - name: Run NSE OI Fetcher
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: "ap-south-1"
+          DYNAMODB_TABLE: ${{ secrets.DYNAMODB_TABLE }}
+        run: python fetch_nse_oi.py
