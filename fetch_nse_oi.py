@@ -3,6 +3,8 @@ import boto3
 import os
 import json
 from datetime import datetime
+import pytz
+import sys
 
 # ===== ENV VARS =====
 DDB_TABLE = os.getenv("DYNAMODB_TABLE", "NSE_OI_DATA")
@@ -13,7 +15,32 @@ HEADERS = {
     "Referer": "https://www.nseindia.com/"
 }
 
+# ===== NSE HOLIDAYS (IST) =====
+NSE_HOLIDAYS_2026 = {
+    "2026-01-15",  # YOUR ADDED HOLIDAY
+    "2026-01-26",  # Republic Day
+    "2026-03-06",  # Holi
+    "2026-03-30",  # Ram Navami
+    "2026-04-14",  # Dr Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-08-15",  # Independence Day
+    "2026-10-02",  # Gandhi Jayanti
+    "2026-11-12",  # Diwali (example)
+}
+
+# =========================
+# FUNCTIONS
+# =========================
+
+def is_nse_holiday():
+    ist = pytz.timezone("Asia/Kolkata")
+    today = datetime.now(ist).strftime("%Y-%m-%d")
+    return today in NSE_HOLIDAYS_2026, today
+
+
 def fetch_nse_oi():
+    print("Connecting to NSE...")
+
     s = requests.Session()
     s.headers.update(HEADERS)
 
@@ -27,6 +54,7 @@ def fetch_nse_oi():
 
     return r.json()
 
+
 def save_to_dynamodb(data):
     dynamodb = boto3.resource("dynamodb")
     table = dynamodb.Table(DDB_TABLE)
@@ -39,11 +67,23 @@ def save_to_dynamodb(data):
 
     table.put_item(Item=item)
 
+
+# =========================
+# MAIN
+# =========================
+
 if __name__ == "__main__":
+
+    is_holiday, today = is_nse_holiday()
+
+    if is_holiday:
+        print(f"Today ({today}) is an NSE Holiday. Skipping run.")
+        sys.exit(0)
+
     print("Fetching NSE OI...")
     data = fetch_nse_oi()
 
     print("Saving to DynamoDB...")
     save_to_dynamodb(data)
 
-    print("Done.")
+    print("Done successfully.")
