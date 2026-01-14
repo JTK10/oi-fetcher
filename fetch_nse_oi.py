@@ -1,11 +1,11 @@
 import requests
-import json
 import boto3
 import os
+import json
+from datetime import datetime
 
 # ===== ENV VARS =====
-S3_BUCKET = os.getenv("S3_BUCKET_NAME")
-S3_KEY = "nse_oi_stock_fut.json"
+DDB_TABLE = os.getenv("DYNAMODB_TABLE", "NSE_OI_DATA")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -23,22 +23,27 @@ def fetch_nse_oi():
     # Step 2: Fetch Stock Futures OI
     url = "https://www.nseindia.com/api/liveEquity-derivatives?index=stock_fut"
     r = s.get(url, timeout=10)
-
     r.raise_for_status()
+
     return r.json()
 
-def save_to_s3(data):
-    s3 = boto3.client("s3")
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=S3_KEY,
-        Body=json.dumps(data),
-        ContentType="application/json"
-    )
+def save_to_dynamodb(data):
+    dynamodb = boto3.resource("dynamodb")
+    table = dynamodb.Table(DDB_TABLE)
+
+    item = {
+        "PK": "NSE#OI",
+        "SK": datetime.utcnow().isoformat(),
+        "data": json.dumps(data)
+    }
+
+    table.put_item(Item=item)
 
 if __name__ == "__main__":
     print("Fetching NSE OI...")
     data = fetch_nse_oi()
-    print("Saving to S3...")
-    save_to_s3(data)
+
+    print("Saving to DynamoDB...")
+    save_to_dynamodb(data)
+
     print("Done.")
