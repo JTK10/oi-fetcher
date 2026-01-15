@@ -10,9 +10,8 @@ from datetime import datetime
 # CONFIGURATION
 # ==========================================
 DDB_TABLE = os.getenv("DYNAMODB_TABLE", "NSE_OI_DATA")
-AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")  # Ensure Region is set
+AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 
-# NSE Headers (Crucial for bypassing blocks)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -28,17 +27,14 @@ NSE_HOLIDAYS_2026 = {
 
 def is_nse_holiday():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    # Also check for weekends (5=Saturday, 6=Sunday)
     weekday = datetime.now().weekday()
     is_weekend = weekday >= 5
     return (today_str in NSE_HOLIDAYS_2026) or is_weekend, today_str
 
 def create_session():
-    """Creates a session and initializes cookies by hitting the homepage."""
     s = requests.Session()
     s.headers.update(HEADERS)
     try:
-        # 1. Hit Homepage to get cookies
         print("   -> Initializing session (getting cookies)...")
         s.get("https://www.nseindia.com", timeout=15)
         return s
@@ -47,7 +43,6 @@ def create_session():
         sys.exit(1)
 
 def fetch_data(session, url, referer):
-    """Generic fetcher with referer update."""
     try:
         session.headers.update({"Referer": referer})
         r = session.get(url, timeout=15)
@@ -64,63 +59,85 @@ def get_merged_nse_data():
     s = create_session()
     
     # ---------------------------------------------------------
-    # STEP 1: Fetch Master Price List (ALL F&O Stocks)
+    # STEP 1: Fetch Master Price List
     # ---------------------------------------------------------
     print("1. Fetching Master Stock Futures List...")
+    # NOTE: This endpoint sometimes returns only 'Most Active' (20 items). 
+    # That is why we MUST merge it with OI Spurts.
     url_master = "https://www.nseindia.com/api/liveEquity-derivatives?index=stock_fut"
     master_resp = fetch_data(s, url_master, "https://www.nseindia.com/market-data/equity-derivatives-watch")
     
-    if not master_resp or "data" not in master_resp:
-        print("CRITICAL: Could not fetch Master List. Exiting.")
-        sys.exit(1)
-        
-    master_list = master_resp["data"] # This contains the 180+ stocks
-    print(f"   -> Got {len(master_list)} stocks from Master List.")
+    master_map = {}
+    if master_resp and "data" in master_resp:
+        for item in master_resp["data"]:
+            sym = item.get("underlying")
+            if sym:
+                master_map[sym] = item
+        print(f"   -> Got {len(master_map)} stocks from Master List.")
 
     # ---------------------------------------------------------
-    # STEP 2: Fetch OI Spurts (Contains 'pChangeInOpenInterest')
+    # STEP 2: Fetch OI Spurts (Primary Source for OI)
     # ---------------------------------------------------------
     print("2. Fetching OI Spurts (for % OI Change)...")
     url_oi = "https://www.nseindia.com/api/live-analysis-oi-spurts-underlyings"
     oi_resp = fetch_data(s, url_oi, "https://www.nseindia.com/market-data/oi-spurts")
     
-    # Create a lookup dictionary for OI data
-    oi_lookup = {}
+    oi_list = []
     if oi_resp and "data" in oi_resp:
-        for item in oi_resp["data"]:
-            # 'symbol' is the key in OI Spurts, 'underlying' is key in Master
-            sym = item.get("symbol")
-            if sym:
-                oi_lookup[sym] = item
-        print(f"   -> Got {len(oi_lookup)} OI Spurt records.")
+        oi_list = oi_resp["data"]
+        print(f"   -> Got {len(oi_list)} OI Spurt records.")
     else:
-        print("   -> WARNING: Could not fetch OI Spurts. Signals may be Neutral.")
+        print("   -> WARNING: Could not fetch OI Spurts.")
 
     # ---------------------------------------------------------
-    # STEP 3: Merge Data
+    # STEP 3: UNION MERGE (The Critical Fix)
     # ---------------------------------------------------------
-    print("3. Merging datasets...")
-    final_data = []
+    print("3. Merging datasets (Union Strategy)...")
+    final_map = {}
+
+    # A. First, populate with OI Spurts Data (Since this usually has 200+ items)
+    for oi_item in oi_list:
+        sym = oi_item.get("symbol")
+        if sym:
+            # Create a base record using OI data
+            final_map[sym] = {
+                "underlying": sym,
+                "symbol": sym,
+                # Map OI specific fields
+                "pChangeInOpenInterest": oi_item.get("pchangeinOpenInterest", 0),
+                "changeinOpenInterest": oi_item.get("changeinOpenInterest", 0),
+                "openInterest": oi_item.get("openInterest", 0),
+                "lastPrice": oi_item.get("latestPrice", 0), # OI spurts has 'latestPrice'
+                # Flag to know where this came from
+                "source": "OI_SPURTS"
+            }
+
+    # B. Now, Overlay Master Data (Better Price Info)
+    # If a stock exists in both, Master data overwrites price fields but keeps OI fields
+    for sym, master_item in master_map.items():
+        if sym in final_map:
+            # UPDATE existing record
+            # We preserve 'pChangeInOpenInterest' from OI Spurts because Master often lacks it
+            p_change_oi = final_map[sym]["pChangeInOpenInterest"]
+            change_oi = final_map[sym]["changeinOpenInterest"]
+            
+            # Update with full master record (High, Low, Open, etc.)
+            final_map[sym].update(master_item)
+            
+            # Restore the OI Change values (critical!)
+            final_map[sym]["pChangeInOpenInterest"] = p_change_oi
+            final_map[sym]["changeinOpenInterest"] = change_oi
+            final_map[sym]["source"] = "MERGED"
+        else:
+            # INSERT new record (If it was in Master but not OI Spurts)
+            master_item["pChangeInOpenInterest"] = 0
+            master_item["changeinOpenInterest"] = 0
+            final_map[sym] = master_item
+            final_map[sym]["source"] = "MASTER_ONLY"
+
+    final_data = list(final_map.values())
+    print(f"   -> Final Merged Count: {len(final_data)} records.")
     
-    for stock in master_list:
-        symbol = stock.get("underlying")
-        
-        # Default values
-        stock["pChangeInOpenInterest"] = 0
-        stock["changeinOpenInterest"] = 0
-        
-        # If we have specific OI data, inject it
-        if symbol in oi_lookup:
-            oi_data = oi_lookup[symbol]
-            # Map the fields from Spurts to the Master record
-            # Note: Field names might vary slightly, we normalize them here
-            stock["pChangeInOpenInterest"] = oi_data.get("pchangeinOpenInterest", 0)
-            stock["changeinOpenInterest"] = oi_data.get("changeinOpenInterest", 0)
-            stock["totalOpenInterest"] = oi_data.get("openInterest", stock.get("openInterest", 0))
-        
-        final_data.append(stock)
-
-    print(f"   -> Merged {len(final_data)} records successfully.")
     return {"data": final_data, "timestamp": datetime.now().isoformat()}
 
 def save_to_dynamodb(json_data):
@@ -128,11 +145,9 @@ def save_to_dynamodb(json_data):
         dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
         table = dynamodb.Table(DDB_TABLE)
 
-        # We store the entire list as a JSON string to fit schema
-        # PK = NSE#OI ensures we always overwrite/fetch the single latest record
         item = {
             "PK": "NSE#OI",
-            "SK": "LATEST", # Constant SK to make querying easy (or use timestamp for history)
+            "SK": "LATEST",
             "updatedAt": datetime.now().isoformat(),
             "data": json.dumps(json_data["data"]) 
         }
