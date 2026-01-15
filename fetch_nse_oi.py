@@ -5,7 +5,6 @@ import json
 from datetime import datetime
 import sys
 
-# ===== ENV VARS =====
 DDB_TABLE = os.getenv("DYNAMODB_TABLE", "NSE_OI_DATA")
 
 HEADERS = {
@@ -14,45 +13,35 @@ HEADERS = {
     "Referer": "https://www.nseindia.com/"
 }
 
-# ===== NSE HOLIDAYS (IST) =====
 NSE_HOLIDAYS_2026 = {
-    "2026-01-15",  # YOUR ADDED HOLIDAY
-    "2026-01-26",  # Republic Day
-    "2026-03-06",  # Holi
-    "2026-03-30",  # Ram Navami
-    "2026-04-14",  # Dr Ambedkar Jayanti
-    "2026-05-01",  # Maharashtra Day
-    "2026-08-15",  # Independence Day
-    "2026-10-02",  # Gandhi Jayanti
-    "2026-11-12",  # Diwali (example)
+    "2026-01-15",
+    "2026-01-26",
+    "2026-03-06",
+    "2026-03-30",
+    "2026-04-14",
+    "2026-05-01",
+    "2026-08-15",
+    "2026-10-02",
+    "2026-11-12",
 }
 
-# =========================
-# FUNCTIONS
-# =========================
-
 def is_nse_holiday():
-    ist = pytz.timezone("Asia/Kolkata")
-    today = datetime.now(ist).strftime("%Y-%m-%d")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
     return today in NSE_HOLIDAYS_2026, today
 
-
 def fetch_nse_oi():
-    print("Connecting to NSE...")
-
     s = requests.Session()
     s.headers.update(HEADERS)
-
-    # Step 1: Set cookies
     s.get("https://www.nseindia.com", timeout=10)
 
-    # Step 2: Fetch Stock Futures OI
     url = "https://www.nseindia.com/api/liveEquity-derivatives?index=stock_fut"
     r = s.get(url, timeout=10)
-    r.raise_for_status()
+
+    if r.status_code != 200:
+        print("NSE blocked the request. Skipping.")
+        sys.exit(0)
 
     return r.json()
-
 
 def save_to_dynamodb(data):
     dynamodb = boto3.resource("dynamodb")
@@ -66,13 +55,7 @@ def save_to_dynamodb(data):
 
     table.put_item(Item=item)
 
-
-# =========================
-# MAIN
-# =========================
-
 if __name__ == "__main__":
-
     is_holiday, today = is_nse_holiday()
 
     if is_holiday:
