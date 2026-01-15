@@ -3,7 +3,6 @@ import boto3
 import os
 import json
 from datetime import datetime
-import pytz
 import sys
 
 # ===== ENV VARS =====
