@@ -55,6 +55,19 @@ def fetch_data(session, url, referer):
         print(f"   -> Exception fetching {url}: {e}")
         return None
 
+# --- NEW: Robust Value Finder ---
+def get_robust_val(item, keys_to_try):
+    """Checks multiple keys to find a value, returns 0 if none found."""
+    for k in keys_to_try:
+        if k in item and item[k] is not None:
+            try:
+                # Remove commas if string formatted numbers
+                val = str(item[k]).replace(',', '')
+                return float(val)
+            except:
+                continue
+    return 0
+
 def get_merged_nse_data():
     s = create_session()
     
@@ -62,8 +75,6 @@ def get_merged_nse_data():
     # STEP 1: Fetch Master Price List
     # ---------------------------------------------------------
     print("1. Fetching Master Stock Futures List...")
-    # NOTE: This endpoint sometimes returns only 'Most Active' (20 items). 
-    # That is why we MUST merge it with OI Spurts.
     url_master = "https://www.nseindia.com/api/liveEquity-derivatives?index=stock_fut"
     master_resp = fetch_data(s, url_master, "https://www.nseindia.com/market-data/equity-derivatives-watch")
     
@@ -86,52 +97,67 @@ def get_merged_nse_data():
     if oi_resp and "data" in oi_resp:
         oi_list = oi_resp["data"]
         print(f"   -> Got {len(oi_list)} OI Spurt records.")
+        
+        # --- DEBUG: PRINT RAW KEYS ---
+        if len(oi_list) > 0:
+            print(f"   -> [DEBUG] Raw Keys in OI Spurts Data: {list(oi_list[0].keys())}")
+            print(f"   -> [DEBUG] Sample Data: {oi_list[0]}")
     else:
         print("   -> WARNING: Could not fetch OI Spurts.")
 
     # ---------------------------------------------------------
-    # STEP 3: UNION MERGE (The Critical Fix)
+    # STEP 3: UNION MERGE (Robust extraction)
     # ---------------------------------------------------------
     print("3. Merging datasets (Union Strategy)...")
     final_map = {}
 
-    # A. First, populate with OI Spurts Data (Since this usually has 200+ items)
     for oi_item in oi_list:
         sym = oi_item.get("symbol")
         if sym:
-            # Create a base record using OI data
+            # TRY ALL POSSIBLE KEY VARIATIONS
+            p_change_oi = get_robust_val(oi_item, [
+                "pchangeinOpenInterest", "pChangeInOI", "pChangeInOpenInterest", "percentChange", "pChgInOI"
+            ])
+            change_oi = get_robust_val(oi_item, [
+                "changeinOpenInterest", "changeInOI", "changeInOpenInterest", "chgInOI"
+            ])
+            open_interest = get_robust_val(oi_item, [
+                "openInterest", "futureOpenInterest", "totOI", "totalOpenInterest"
+            ])
+            last_price = get_robust_val(oi_item, [
+                "latestPrice", "lastPrice", "ltp"
+            ])
+
             final_map[sym] = {
                 "underlying": sym,
                 "symbol": sym,
-                # Map OI specific fields
-                "pChangeInOpenInterest": oi_item.get("pchangeinOpenInterest", 0),
-                "changeinOpenInterest": oi_item.get("changeinOpenInterest", 0),
-                "openInterest": oi_item.get("openInterest", 0),
-                "lastPrice": oi_item.get("latestPrice", 0), # OI spurts has 'latestPrice'
-                # Flag to know where this came from
+                "pChangeInOpenInterest": p_change_oi,
+                "changeinOpenInterest": change_oi,
+                "openInterest": open_interest,
+                "lastPrice": last_price,
                 "source": "OI_SPURTS"
             }
 
-    # B. Now, Overlay Master Data (Better Price Info)
-    # If a stock exists in both, Master data overwrites price fields but keeps OI fields
+    # Overlay Master Data
     for sym, master_item in master_map.items():
         if sym in final_map:
-            # UPDATE existing record
-            # We preserve 'pChangeInOpenInterest' from OI Spurts because Master often lacks it
+            # Preserve the extracted OI values
             p_change_oi = final_map[sym]["pChangeInOpenInterest"]
             change_oi = final_map[sym]["changeinOpenInterest"]
+            oi_val = final_map[sym]["openInterest"] # Keep OI from spurts if Master is missing it
             
-            # Update with full master record (High, Low, Open, etc.)
             final_map[sym].update(master_item)
             
-            # Restore the OI Change values (critical!)
-            final_map[sym]["pChangeInOpenInterest"] = p_change_oi
-            final_map[sym]["changeinOpenInterest"] = change_oi
+            # Restore OI values if Master overwrote them with 0 or None
+            if p_change_oi != 0: final_map[sym]["pChangeInOpenInterest"] = p_change_oi
+            if change_oi != 0: final_map[sym]["changeinOpenInterest"] = change_oi
+            if oi_val != 0: final_map[sym]["openInterest"] = oi_val
+            
             final_map[sym]["source"] = "MERGED"
         else:
-            # INSERT new record (If it was in Master but not OI Spurts)
-            master_item["pChangeInOpenInterest"] = 0
-            master_item["changeinOpenInterest"] = 0
+            # Use robust extractor on Master items too, just in case
+            master_item["pChangeInOpenInterest"] = get_robust_val(master_item, ["pchangeinOpenInterest", "pChangeInOI", "pChange"])
+            master_item["changeinOpenInterest"] = get_robust_val(master_item, ["changeinOpenInterest", "changeInOI", "change"])
             final_map[sym] = master_item
             final_map[sym]["source"] = "MASTER_ONLY"
 
